@@ -82,31 +82,35 @@ def scanner_loop():
 
 def run_backtest_thread():
     try:
-        send_tg("⏳ *Backtest LONG+SHORT Start... 3-4 min lagega*\nFilter: Vol1.5x + RSI + Funding + BTC")
+        send_tg("⏳ *Backtest LONG+SHORT Start... 2 min*")
         report=[]
         for coin in COINS[:10]:
             try:
                 url=f"https://api.delta.exchange/v2/chart/candles?symbol={coin}&resolution=1d&count=110"
                 r=requests.get(url, timeout=20).json()
-                candles=r.get("result", []) if r.get("success") else []
-                if len(candles)<40:
-                    report.append(f"{coin} - No Data")
+                raw=r.get("result", []) if r.get("success") else []
+                if len(raw)<40:
+                    report.append(f"{coin} NoData {len(raw)}")
                     continue
+                # Delta kabhi list, kabhi dict deta hai - dono handle
+                candles=[]
+                for x in raw:
+                    if isinstance(x, dict):
+                        candles.append([x.get("time",0), float(x.get("open",0)), float(x.get("high",0)), float(x.get("low",0)), float(x.get("close",0)), float(x.get("volume",0))])
+                    else:
+                        candles.append(x)
+                
                 long_t=long_w=short_t=short_w=0
                 for i in range(30,len(candles)-4):
                     try:
                         curr_v=float(candles[i][5])*float(candles[i][4])
                         vols=[float(c[5])*float(c[4]) for c in candles[i-20:i]]
-                        avg_v=sum(vols)/len(vols) if vols else 0
+                        avg_v=sum(vols)/len(vols)
                         if avg_v==0 or curr_v <= avg_v*1.5: continue
                         closes=[float(c[4]) for c in candles[i-14:i+1]]
-                        if len(closes)<15: continue
-                        gain=loss=0.001
-                        for k in range(1,len(closes)):
-                            d=closes[k]-closes[k-1]
-                            if d>0: gain+=d
-                            else: loss+=abs(d)
-                        rsi=100-(100/(1+(gain/loss)))
+                        gain=sum([max(0, closes[k]-closes[k-1]) for k in range(1,len(closes))])
+                        loss=sum([max(0, closes[k-1]-closes[k]) for k in range(1,len(closes))])+0.0001
+                        rsi=100-(100/(1+gain/loss))
                         if 30<rsi<68:
                             long_t+=1
                             entry=float(candles[i][4])
@@ -119,14 +123,12 @@ def run_backtest_thread():
                 l_per=int(long_w*100/long_t) if long_t else 0
                 s_per=int(short_w*100/short_t) if short_t else 0
                 report.append(f"{coin} L:{long_t} {l_per}% | S:{short_t} {s_per}%")
-            except:
-                report.append(f"{coin} Err")
+            except Exception as e:
+                report.append(f"{coin} {str(e)[:20]}")
             time.sleep(0.6)
-        msg="*100D Backtest - Vol1.5x + RSI + Funding*\n\n" + "\n".join(report) + "\n\n✅ Yehi filter LIVE me hai"
-        send_tg(msg)
+        send_tg("*100D Backtest - Vol1.5x + RSI + Funding*\n\n" + "\n".join(report) + "\n\n✅ Yehi filter LIVE hai")
     except Exception as e:
-        send_tg(f"Backtest Crash: {str(e)[:200]}")
-
+        send_tg(f"Crash: {e}")
 def bot_polling():
     offset=0
     while True:
