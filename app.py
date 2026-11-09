@@ -1,7 +1,7 @@
 import threading, time, requests
 from flask import Flask
 
-BOT = "8819864573:AAEE_DHr1nmwVBwI2A38cnYJTGAOF1aHq10Y"
+BOT = "8819864573:AAEE_DHr1nmwVBwI2A38cnYJTGAOF1aHq10"
 CHAT = "7086505670"
 app = Flask(__name__)
 
