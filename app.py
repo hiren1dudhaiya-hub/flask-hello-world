@@ -82,50 +82,69 @@ def scanner_loop():
 
 def run_backtest_thread():
     try:
-        send_tg("⏳ *Backtest LONG+SHORT Start... 2 min*")
+        send_tg("⏳ *Backtest Start... 2 min* Vol1.5x + RSI")
         report=[]
         for coin in COINS[:10]:
             try:
-                url=f"https://api.delta.exchange/v2/chart/candles?symbol={coin}&resolution=1d&count=110"
-                r=requests.get(url, timeout=20).json()
-                raw=r.get("result", []) if r.get("success") else []
-                if len(raw)<40:
-                    report.append(f"{coin} NoData {len(raw)}")
+                # Daily fail ho raha hai, isiliye 4h use kar rahe hai
+                url=f"https://api.delta.exchange/v2/chart/candles?symbol={coin}&resolution=1h&count=500"
+                resp=requests.get(url, timeout=20, headers={"User-Agent":"Mozilla/5.0"})
+                data=resp.json()
+                raw=data.get("result", []) if data.get("success") else []
+                if len(raw)<100:
+                    report.append(f"{coin} NoData")
                     continue
-                # Delta kabhi list, kabhi dict deta hai - dono handle
-                candles=[]
-                for x in raw:
-                    if isinstance(x, dict):
-                        candles.append([x.get("time",0), float(x.get("open",0)), float(x.get("high",0)), float(x.get("low",0)), float(x.get("close",0)), float(x.get("volume",0))])
-                    else:
-                        candles.append(x)
+                # 1h se daily banao - har 24 candle ka 1 daily
+                daily=[]
+                for i in range(0,len(raw),24):
+                    chunk=raw[i:i+24]
+                    if len(chunk)<24: continue
+                    # chunk list ya dict ho sakta hai
+                    closes=[]
+                    highs=[]
+                    lows=[]
+                    vols=[]
+                    for x in chunk:
+                        if isinstance(x, dict):
+                            closes.append(float(x.get("close",0)))
+                            highs.append(float(x.get("high",0)))
+                            lows.append(float(x.get("low",0)))
+                            vols.append(float(x.get("volume",0))*float(x.get("close",0)))
+                        else:
+                            closes.append(float(x[4])); highs.append(float(x[2])); lows.append(float(x[3])); vols.append(float(x[5])*float(x[4]))
+                    if not closes: continue
+                    daily.append([0, closes[0], max(highs), min(lows), closes[-1], sum(vols)/closes[-1] if closes[-1] else 0])
                 
+                if len(daily)<40:
+                    report.append(f"{coin} Less daily")
+                    continue
+
                 long_t=long_w=short_t=short_w=0
-                for i in range(30,len(candles)-4):
+                for i in range(30,len(daily)-4):
                     try:
-                        curr_v=float(candles[i][5])*float(candles[i][4])
-                        vols=[float(c[5])*float(c[4]) for c in candles[i-20:i]]
-                        avg_v=sum(vols)/len(vols)
+                        curr_v=float(daily[i][5])*float(daily[i][4])
+                        vols=[float(c[5])*float(c[4]) for c in daily[i-20:i]]
+                        avg_v=sum(vols)/len(vols) if vols else 0
                         if avg_v==0 or curr_v <= avg_v*1.5: continue
-                        closes=[float(c[4]) for c in candles[i-14:i+1]]
+                        closes=[float(c[4]) for c in daily[i-14:i+1]]
                         gain=sum([max(0, closes[k]-closes[k-1]) for k in range(1,len(closes))])
                         loss=sum([max(0, closes[k-1]-closes[k]) for k in range(1,len(closes))])+0.0001
                         rsi=100-(100/(1+gain/loss))
                         if 30<rsi<68:
                             long_t+=1
-                            entry=float(candles[i][4])
-                            if max([float(c[2]) for c in candles[i+1:i+4]])>=entry*1.02: long_w+=1
+                            entry=float(daily[i][4])
+                            if max([float(c[2]) for c in daily[i+1:i+4]])>=entry*1.02: long_w+=1
                         elif rsi>70:
                             short_t+=1
-                            entry=float(candles[i][4])
-                            if min([float(c[3]) for c in candles[i+1:i+4]])<=entry*0.98: short_w+=1
+                            entry=float(daily[i][4])
+                            if min([float(c[3]) for c in daily[i+1:i+4]])<=entry*0.98: short_w+=1
                     except: continue
                 l_per=int(long_w*100/long_t) if long_t else 0
                 s_per=int(short_w*100/short_t) if short_t else 0
                 report.append(f"{coin} L:{long_t} {l_per}% | S:{short_t} {s_per}%")
             except Exception as e:
-                report.append(f"{coin} {str(e)[:20]}")
-            time.sleep(0.6)
+                report.append(f"{coin} {str(e)[:15]}")
+            time.sleep(0.5)
         send_tg("*100D Backtest - Vol1.5x + RSI + Funding*\n\n" + "\n".join(report) + "\n\n✅ Yehi filter LIVE hai")
     except Exception as e:
         send_tg(f"Crash: {e}")
