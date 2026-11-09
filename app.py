@@ -8,51 +8,41 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
 print(f"=== ENV CHECK ===")
-print(f"BOT_TOKEN len: {len(BOT_TOKEN)} value start: {BOT_TOKEN[:6]}...")
-print(f"CHAT_ID len: {len(CHAT_ID)} value: {CHAT_ID}")
+print(f"BOT_TOKEN len: {len(BOT_TOKEN)}")
+print(f"CHAT_ID: {CHAT_ID}")
 
 def send_telegram(text):
-    print(f"Attempting to send TG to {CHAT_ID}...")
-    if not BOT_TOKEN or not CHAT_ID:
-        print("ENV Missing! Cannot send")
-        return
+    print(f"Sending TG to {CHAT_ID}...")
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
-        r = requests.post(url, json=payload, timeout=15)
-        print(f"TG Response: {r.status_code} - {r.text[:200]}")
-        return r.text
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=15)
+        print(f"TG Response: {r.status_code} {r.text[:300]}")
     except Exception as e:
-        print(f"TG Error Exception: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"TG Error: {e}")
 
 def bot_polling():
     print("=== BOT POLLING STARTED ===")
-    time.sleep(3)
-    send_telegram("✅ *Delta20 Bot FINAL LIVE!*\n\nBot Render pe successfully start ho gaya!\n`/start` bhejo")
+    time.sleep(2)
+    send_telegram("✅ *Delta20 Bot LIVE!* Bot start ho gaya!")
     offset = 0
-    print("Starting getUpdates loop...")
     while True:
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?timeout=30&offset={offset}"
             resp = requests.get(url, timeout=35).json()
             if resp.get("ok"):
-                for update in resp.get("result", []):
-                    offset = update["update_id"] + 1
-                    msg = update.get("message", {})
-                    text = msg.get("text", "")
-                    print(f"Received: {text}")
-                    if text == "/start":
-                        send_telegram("🤖 *Delta 20 Scanner LIVE hai!*\n\nAb kaam kar raha hai.")
+                for u in resp.get("result", []):
+                    offset = u["update_id"] + 1
+                    t = u.get("message", {}).get("text", "")
+                    print(f"Got msg: {t}")
+                    if t == "/start":
+                        send_telegram("🤖 LIVE hai!")
         except Exception as e:
-            print(f"Polling error: {e}")
+            print(f"Polling err: {e}")
             time.sleep(5)
-        time.sleep(1)
 
 @app.route('/')
 def home():
-    return f"Bot Live! Token len {len(BOT_TOKEN)} Chat {CHAT_ID}"
+    return f"Bot Live! Token:{len(BOT_TOKEN)} Chat:{CHAT_ID}"
 
 Thread(target=bot_polling, daemon=True).start()
 
