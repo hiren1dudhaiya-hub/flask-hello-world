@@ -9,7 +9,7 @@ COINS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","DOGEUSDT",
 
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Delta 20 Bot LIVE - BUY+SELL 1.5x Vol"
+def home(): return "Delta 20 V3 FINAL - Vol 1.5x + BB + RSI9 + Funding + SMA20"
 
 def send_telegram(msg):
     try:
@@ -28,12 +28,20 @@ def get_klines(symbol, interval="1d", limit=100):
             df = pd.DataFrame(data, columns=['open_time','open','high','low','close','volume','close_time','qav','trades','taker_base','taker_quote','ignore'])
             df['close'] = df['close'].astype(float)
             df['qav'] = df['qav'].astype(float)
-            df['volume'] = df['volume'].astype(float)
             return df
         except: time.sleep(1)
     return None
 
-def calculate_rsi(series, period=14):
+def get_funding_rate(symbol):
+    try:
+        url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+        params = {"symbol": symbol}
+        r = requests.get(url, params=params, timeout=5).json()
+        return float(r.get('lastFundingRate', 0)) * 100
+    except:
+        return 0
+
+def calculate_rsi(series, period=9):
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(window=period).mean()
     loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
@@ -43,9 +51,9 @@ def calculate_rsi(series, period=14):
 def scan_market(manual=False):
     btc_d = get_klines("BTCUSDT", "1d", 60)
     if btc_d is None: return None
-    btc_d['ema50'] = btc_d['close'].ewm(span=50).mean()
-    btc_bullish = btc_d['close'].iloc[-1] > btc_d['ema50'].iloc[-1]
-    btc_status = 'BULLISH 🟢' if btc_bullish else 'BEARISH 🔴'
+    btc_d['sma20'] = btc_d['close'].rolling(20).mean()
+    btc_bullish = btc_d['close'].iloc[-1] > btc_d['sma20'].iloc[-1]
+    btc_status = 'BULLISH 🟢 (BTC > 20SMA)' if btc_bullish else 'BEARISH 🔴 (BTC < 20SMA)'
     
     buy_signals = []
     sell_signals = []
@@ -54,33 +62,42 @@ def scan_market(manual=False):
         time.sleep(0.3)
         d = get_klines(symbol, "1d", 100)
         h = get_klines(symbol, "1h", 100)
-        if d is None or h is None or len(d) < 50: continue
+        if d is None or h is None or len(d) < 30 or len(h) < 15: continue
         
-        d['rsi'] = calculate_rsi(d['close'])
-        h['rsi'] = calculate_rsi(h['close'])
+        d['sma20'] = d['close'].rolling(20).mean()
         d['vol_avg'] = d['qav'].rolling(20).mean()
-        
         vol_ratio = d['qav'].iloc[-1] / d['vol_avg'].iloc[-1] if d['vol_avg'].iloc[-1] > 0 else 0
+        
+        h['rsi9'] = calculate_rsi(h['close'], 9)
+        
+        cross_up = d['close'].iloc[-2] < d['sma20'].iloc[-2] and d['close'].iloc[-1] > d['sma20'].iloc[-1]
+        cross_down = d['close'].iloc[-2] > d['sma20'].iloc[-2] and d['close'].iloc[-1] < d['sma20'].iloc[-1]
+        
+        # 1 Ghante wala - Current Hour vs Previous Hour
+        rsi_rising = h['rsi9'].iloc[-1] > h['rsi9'].iloc[-2]
+        rsi_falling = h['rsi9'].iloc[-1] < h['rsi9'].iloc[-2]
+        
         price = d['close'].iloc[-1]
+        funding = get_funding_rate(symbol)
         
-        # BUY: BTC UP + Vol 1.5x + 1D Rising + 1H Rising 30-68
-        buy_cond = btc_bullish and vol_ratio >= 1.5 and d['rsi'].iloc[-1] > d['rsi'].iloc[-2] and h['rsi'].iloc[-1] > h['rsi'].iloc[-2] and (30 <= h['rsi'].iloc[-1] <= 68)
-        
-        # SELL: BTC DOWN + Vol 1.5x + 1D Falling + 1H Falling 32-70
-        sell_cond = (not btc_bullish) and vol_ratio >= 1.5 and d['rsi'].iloc[-1] < d['rsi'].iloc[-2] and h['rsi'].iloc[-1] < h['rsi'].iloc[-2] and (32 <= h['rsi'].iloc[-1] <= 70)
+        funding_ok_for_buy = funding < 0.10
+        funding_ok_for_sell = funding > -0.10
+
+        buy_cond = btc_bullish and vol_ratio >= 1.5 and cross_up and rsi_rising and funding_ok_for_buy
+        sell_cond = (not btc_bullish) and vol_ratio >= 1.5 and cross_down and rsi_falling and funding_ok_for_sell
         
         if buy_cond:
-            buy_signals.append(f"🚀 **BUY {symbol}** | {price:.2f} | 1D↑ {d['rsi'].iloc[-1]:.1f} | 1H {h['rsi'].iloc[-1]:.1f}↑ | Vol {vol_ratio:.2f}x")
+            buy_signals.append(f"🚀 **BUY {symbol}** | {price:.3f} | BB↑ | 1H RSI9 {h['rsi9'].iloc[-2]:.1f}->{h['rsi9'].iloc[-1]:.1f}↑ | Vol {vol_ratio:.2f}x | Fund {funding:.4f}%")
         if sell_cond:
-            sell_signals.append(f"🔻 **SELL {symbol}** | {price:.2f} | 1D↓ {d['rsi'].iloc[-1]:.1f} | 1H {h['rsi'].iloc[-1]:.1f}↓ | Vol {vol_ratio:.2f}x")
+            sell_signals.append(f"🔻 **SELL {symbol}** | {price:.3f} | BB↓ | 1H RSI9 {h['rsi9'].iloc[-2]:.1f}->{h['rsi9'].iloc[-1]:.1f}↓ | Vol {vol_ratio:.2f}x | Fund {funding:.4f}%")
 
     all_signals = buy_signals + sell_signals
     if all_signals:
-        msg = f"🔥 **Delta 20 (BUY+SELL)** 🔥\nBTC: {btc_status} | 20D Vol 1.5x\n\n" + "\n".join(all_signals)
+        msg = f"🔥 **Delta 20 V3 FINAL** 🔥\nBTC: {btc_status} | Vol>=1.5x\n\n" + "\n".join(all_signals)
         send_telegram(msg); return msg
     else:
         if manual:
-            msg = f"😴 **No Signal - Market Thanda Hai**\nBTC: {btc_status}\nBuy: Bullish+Rising, Sell: Bearish+Falling me se koi match nahi."
+            msg = f"😴 **No Signal - Market Thanda**\nBTC: {btc_status}\nFilter: Vol>=1.5x + 1D BB Cross + 1H RSI9 1hr Rising/Falling + Funding"
             send_telegram(msg); return msg
         return None
 
@@ -94,17 +111,15 @@ def telegram_polling():
                 offset = update["update_id"] + 1
                 text = update.get("message", {}).get("text", "")
                 if "/scan" in text:
-                    send_telegram("🔍 Scan Start (BUY+SELL 1.5x Check)...")
+                    send_telegram("🔍 V3 FINAL Scan Start...")
                     scan_market(manual=True)
-                if "/backtest" in text:
-                    send_telegram("📊 **Backtest 1.5x BUY+SELL**\nBUY: 42 trades 66% win\nSELL: 38 trades 64% win\nTotal Avg: +2.6%")
             time.sleep(2)
         except Exception as e: print(f"Polling: {e}"); time.sleep(5)
 
 def auto_scan_loop():
     time.sleep(20)
     while True:
-        print("Auto Scan..."); scan_market(manual=False); time.sleep(1800)
+        print("Auto Scan V3..."); scan_market(manual=False); time.sleep(1800)
 
 threading.Thread(target=telegram_polling, daemon=True).start()
 threading.Thread(target=auto_scan_loop, daemon=True).start()
