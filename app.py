@@ -1,113 +1,123 @@
+import os
+import time
+import requests
+import threading
 from flask import Flask
-import threading, time, os, requests
-from datetime import datetime
+import pandas as pd
+
+# --- CONFIG ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")  # Tera Telegram Chat ID
+
+COINS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+    "LTCUSDT", "BCHUSDT", "UNIUSDT", "XLMUSDT", "ETCUSDT",
+    "FILUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "NEARUSDT"
+]
 
 app = Flask(__name__)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-COINS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT", "BCHUSDT", "UNIUSDT", "XLMUSDT", "ETCUSDT", "FILUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "NEARUSDT"]
+@app.route('/')
+def home():
+    return "Delta 20 Bot is LIVE - Auto 30 Min Active"
 
-def send(msg):
+# --- TELEGRAM SEND ---
+def send_telegram(msg):
+    if not BOT_TOKEN or not CHAT_ID:
+        return
     try:
-        requests.post(f"{BASE_URL}/sendMessage", data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=15)
-    except: pass
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+    except Exception as e:
+        print(f"Telegram Error: {e}")
 
-def get_real_vol_ratio(symbol):
+# --- BINANCE DATA ---
+def get_klines(symbol, interval="1h", limit=100):
     try:
-        # 20 din ka daily volume
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1d&limit=21"
-        klines = requests.get(url, timeout=10).json()
-        vols = [float(k[5]) for k in klines[:-1]] # pichle 20 din
-        avg_vol = sum(vols) / len(vols) if vols else 1
-        curr_vol = float(klines[-1][5]) # aaj ka
-        ratio = curr_vol / avg_vol if avg_vol > 0 else 0
-        return ratio, curr_vol, avg_vol
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+        df = pd.DataFrame(data, columns=['open_time','open','high','low','close','volume','close_time','qav','trades','taker_base','taker_quote','ignore'])
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        return df
     except:
-        return 0, 0, 0
+        return None
 
-def get_rsi(symbol):
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
-        klines = requests.get(url, timeout=10).json()
-        closes = [float(k[4]) for k in klines]
-        gains = 0; losses = 0
-        for i in range(1, 15):
-            diff = closes[-i] - closes[-i-1]
-            if diff > 0: gains += diff
-            else: losses -= diff
-        if losses == 0: return 100
-        rs = gains / losses
-        return 100 - (100 / (1 + rs))
-    except:
-        return 50
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-def get_btc_trend():
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=20"
-        klines = requests.get(url, timeout=10).json()
-        closes = [float(k[4]) for k in klines]
-        return closes[-1] > sum(closes[-6:-1])/5
-    except:
-        return True
+# --- CORE SCANNER (1.3x Vol + RSI) ---
+def scan_market(manual=False):
+    signals = []
+    for symbol in COINS:
+        df = get_klines(symbol)
+        if df is None or len(df) < 50:
+            continue
+        
+        df['rsi'] = calculate_rsi(df['close'])
+        last = df.iloc[-1]
+        prev_vol_avg = df['volume'].iloc[-21:-1].mean() # last 20 candle avg
+        
+        vol_ratio = last['volume'] / prev_vol_avg if prev_vol_avg > 0 else 0
+        rsi_val = last['rsi']
+        price = last['close']
 
-def do_scan():
-    btc_bullish = get_btc_trend()
-    btc_status = "BULLISH 🟢" if btc_bullish else "BEARISH 🔴"
-    send(f"🔍 *Scan Start (Real 1.3x Vol)*\nBTC: {btc_status}\n20D Avg Vol se check kar raha hu...")
-    
-    found = 0
-    for coin in COINS:
-        try:
-            rsi = get_rsi(coin)
-            vol_ratio, curr_vol, avg_vol = get_real_vol_ratio(coin)
-            
-            # YAHI ASLI LOGIC HAI - 1.3x
-            vol_ok = False
-            if vol_ratio >= 1.5: vol_ok = True
-            elif vol_ratio >= 1.3 and (rsi < 40 or rsi > 60): vol_ok = True
-            
-            # Debug - har coin ka vol dikhayega
-            print(f"{coin} Vol Ratio: {vol_ratio:.2f} RSI: {rsi:.1f}")
+        # CONDITION: Vol > 1.3x and RSI logic
+        if vol_ratio >= 1.3:
+            if rsi_val < 35:
+                signals.append(f"🚀 **BUY: {symbol}** | Price: {price:.2f} | RSI: {rsi_val:.1f} | Vol: {vol_ratio:.2f}x")
+            elif rsi_val > 70:
+                signals.append(f"🔻 **SELL: {symbol}** | Price: {price:.2f} | RSI: {rsi_val:.1f} | Vol: {vol_ratio:.2f}x")
 
-            if vol_ok:
-                if rsi < 35 and btc_bullish:
-                    send(f"🚀 *LONG* {coin}\nRSI: {rsi:.1f}\nVol: {vol_ratio:.2f}x (Avg: {int(avg_vol)} vs Today: {int(curr_vol)})\nBTC: {btc_status}")
-                    found += 1
-                elif rsi > 68 and not btc_bullish:
-                    send(f"🔻 *SHORT* {coin}\nRSI: {rsi:.1f}\nVol: {vol_ratio:.2f}x\nBTC: {btc_status}")
-                    found += 1
-            time.sleep(0.2)
-        except: continue
-    
-    if found == 0:
-        send(f"❌ *No Signal - Market Thanda Hai*\nBTC: {btc_status}\nNote: Saare coins ka Vol Ratio 1.3x se kam hai isliye skip kiya. Ye market ka condition hai, code ka nahi. Sham ko volatility badhne pe signal pakka ayega.")
+    if signals:
+        msg = "🔥 **Delta 20 Signal (Binance Data)** 🔥\n\n" + "\n".join(signals)
+        send_telegram(msg)
+        return msg
+    else:
+        if manual:
+            msg = "😴 **No Signal - Market Thanda Hai** (20 coin checked on Binance)"
+            send_telegram(msg)
+            return msg
+        return None
 
-def do_backtest():
-    # Ab asli backtest result dega
-    send("📊 *100D Backtest Result (1.3x System)*\n\nTotal Trades: 87\nWin: 58 (66.6%)\nLoss: 29\nAvg Profit: +2.8%\n\nNote: Ye 1.3x pe backtest hai. 1.5x pe trades 42 the. Matlab 1.3x pe signal 2x badh gaye, Win Rate same hai!")
-
-def bot_loop():
-    send("✅ *Delta 20 LIVE - Real Vol Fix* ✅\nAb asli 20D Avg Volume se 1.3x check hoga.\n/scan - Scan\n/backtest - Result")
+# --- TELEGRAM COMMAND LISTENER ---
+def telegram_polling():
     offset = 0
     while True:
         try:
-            resp = requests.get(f"{BASE_URL}/getUpdates", params={"offset": offset, "timeout": 20}, timeout=25).json()
-            for upd in resp.get("result", []):
-                offset = upd["update_id"] + 1
-                text = upd.get("message", {}).get("text", "")
-                chat_id = str(upd.get("message", {}).get("chat", {}).get("id", ""))
-                if chat_id != str(CHAT_ID): continue
-                if text == "/scan": threading.Thread(target=do_scan, daemon=True).start()
-                elif text == "/backtest" or text == "/backtest result" or text == "/result": threading.Thread(target=do_backtest, daemon=True).start()
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
+            r = requests.get(url, timeout=25).json()
+            for update in r.get("result", []):
+                offset = update["update_id"] + 1
+                text = update.get("message", {}).get("text", "")
+                if "/scan" in text:
+                    send_telegram("🔍 Scan Start (Real 1.3x Vol - Binance)...")
+                    result = scan_market(manual=True)
+                if "/backtest" in text:
+                    send_telegram("Backtest feature coming soon in this version")
             time.sleep(2)
-        except: time.sleep(5)
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(5)
 
-threading.Thread(target=bot_loop, daemon=True).start()
+# --- AUTO 30 MIN LOOP ---
+def auto_scan_loop():
+    time.sleep(20) # Bot start ke 20 sec baad pehla scan
+    while True:
+        print("Auto 30 Min Scan Running...")
+        scan_market(manual=False) # Signal hoga to hi message jayega
+        time.sleep(1800) # 30 min = 1800 sec
 
-@app.route('/')
-def home(): return f"LIVE 1.3x Real Vol - {datetime.now()}"
+# Start Threads
+threading.Thread(target=telegram_polling, daemon=True).start()
+threading.Thread(target=auto_scan_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
